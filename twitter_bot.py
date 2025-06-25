@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 import logging
 import os
 from tweepy import OAuth1UserHandler, API
-import traceback
 
+# ... (importy i konfiguracja OpenAI bez zmian) ...
 # Try to import OpenAI - handle different versions
 openai_client = None
 try:
@@ -43,42 +43,57 @@ api_secret = os.getenv("TWITTER_API_SECRET")
 access_token = os.getenv("TWITTER_ACCESS_TOKEN")
 access_token_secret = os.getenv("TWITTER_ACCESS_TOKEN_SECRET")
 
-# POPRAWIONA LINIA:
 OUTLIGHT_API_URL = "https://outlight.fun/api/tokens/most-called?timeframe=1h"
 
-def safe_tweet_with_retry(client, text, max_retries=3):
+# ... (funkcje safe_tweet_with_retry i safe_media_upload bez zmian) ...
+def safe_tweet_with_retry(client, text, media_ids=None, in_reply_to_tweet_id=None, max_retries=3):
     """
     Safely send tweet with rate limit handling and retry logic
     """
     for attempt in range(max_retries):
         try:
-            response = client.create_tweet(text=text)
+            response = client.create_tweet(
+                text=text,
+                media_ids=media_ids,
+                in_reply_to_tweet_id=in_reply_to_tweet_id
+            )
             logging.info(f"Tweet sent successfully! ID: {response.data['id']}")
             return response
+            
         except tweepy.TooManyRequests as e:
             reset_time = int(e.response.headers.get('x-rate-limit-reset', 0))
             current_time = int(time.time())
             wait_time = max(reset_time - current_time + 60, 300)
-            logging.warning(f"Rate limit exceeded. Attempt {attempt + 1}/{max_retries}. Waiting {wait_time} seconds.")
+            
+            logging.warning(f"Rate limit exceeded. Attempt {attempt + 1}/{max_retries}")
+            logging.warning(f"Waiting {wait_time} seconds before retry")
+            
             if attempt < max_retries - 1:
                 time.sleep(wait_time)
             else:
-                logging.error("Maximum retry attempts for tweeting exceeded.")
+                logging.error("Maximum retry attempts exceeded. Tweet not sent.")
                 raise e
-        except (tweepy.Forbidden, tweepy.BadRequest) as e:
-            logging.error(f"Critical Twitter API error: {e}")
+                
+        except tweepy.Forbidden as e:
+            logging.error(f"Authorization error: {e}")
             raise e
+            
+        except tweepy.BadRequest as e:
+            logging.error(f"Bad request (possibly tweet too long?): {e}")
+            raise e
+            
         except Exception as e:
-            logging.error(f"Unexpected error on tweet attempt {attempt + 1}: {e}")
+            logging.error(f"Unexpected error on attempt {attempt + 1}: {e}")
             if attempt == max_retries - 1:
                 raise e
             time.sleep(30)
+    
     return None
 
 def get_top_tokens():
     """Fetch data from outlight.fun API"""
     try:
-        response = requests.get(OUTLIGHT_API_URL, timeout=30)
+        response = requests.get(OUTLIGHT_API_URL)
         response.raise_for_status()
         data = response.json()
 
@@ -93,101 +108,107 @@ def get_top_tokens():
                 tokens_with_filtered_calls.append(token_copy)
 
         sorted_tokens = sorted(tokens_with_filtered_calls, key=lambda x: x.get('filtered_calls', 0), reverse=True)
-        return sorted_tokens[:3]
-    except requests.exceptions.RequestException as e:
+        top_3 = sorted_tokens[:3]
+        return top_3
+    except Exception as e:
         logging.error(f"Error fetching data from API: {e}")
         return None
 
 def generate_ai_tweet(top_3_tokens):
-    """Generate intelligent tweet using OpenAI with full contract addresses"""
+    """Generate intelligent tweet using OpenAI based on token data"""
     if not openai_client:
         logging.error("OpenAI client not available. Cannot generate tweet.")
         return None
         
-    token_data = []
-    for i, token in enumerate(top_3_tokens, 1):
-        calls = token.get('filtered_calls', 0)
-        symbol = token.get('symbol', 'Unknown')
-        address = token.get('address', 'No Address Provided')
-        # Używamy pełnego adresu
-        token_data.append(f"{i}. ${symbol} - {calls} calls - CA: {address}")
-    
-    data_summary = "\n".join(token_data)
-    
-    system_prompt = """You are MONTY, an AI agent with a distinctive style for crypto content.
+    try:
+        token_data = []
+        for i, token in enumerate(top_3_tokens, 1):
+            calls = token.get('filtered_calls', 0)
+            symbol = token.get('symbol', 'Unknown')
+            address = token.get('address', 'No Address')
+            # ZMIANA: Używamy pełnego adresu zamiast skracanego
+            full_address = address if address != 'No Address' else 'No Address'
+            token_data.append(f"{i}. ${symbol} - {calls} calls - CA: {full_address}")
+        
+        data_summary = "\n".join(token_data)
+        total_calls = sum(token.get('filtered_calls', 0) for token in top_3_tokens)
+        
+        system_prompt = """You are MONTY, an AI agent with a distinctive style for crypto content, responding in English.
 
 PERSONALITY & STYLE:
-- Brilliant and witty.
-- Use crypto-appropriate metaphors.
-- Very short texts, abbreviated thoughts.
-- Funny and slightly witty but never rude.
+- Brilliant and witty
+- Use crypto-appropriate metaphors
+- Very short texts, abbreviated thoughts, no long full sentences
+- Funny and slightly witty but never rude
 
 CONTENT FOCUS:
-- Crypto analytics and Solana meme tokens.
-- **When mentioning a token, include its symbol and its full Contract Address (CA) for user convenience.**
-- Use effective hooks.
+- Crypto analytics and token data.
+- **When mentioning a token, include its symbol and its FULL Contract Address (CA) for user convenience.**
+- Use effective hooks in post beginnings.
+- Solana memes niche specialty.
 
 LANGUAGE & LIMITS:
 - English B1/B2 level max.
+- Keep within X character limits.
 - Make each post unique and engaging."""
-    
-    prompt = f"""Create a crypto Twitter post about the most called tokens in the last hour as MONTY.
+        
+        prompt = f"""Create a crypto Twitter post about the most called tokens in the last hour as MONTY.
 
 DATA:
 {data_summary}
 
+Total calls tracked: {total_calls}
+
 Create 1 engaging post:
 - Start with a strong hook.
-- **Include the token data (Symbol and full CA) naturally.**
+- **Include the token data (Symbol and FULL CA) naturally.**
 - Use MONTY's witty, brief style.
 - Max 270 chars preferred.
 - Include relevant emojis.
+- Focus on Solana/meme insights.
 
 Just return the tweet text, no labels."""
 
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            logging.info(f"Generating AI tweet (Attempt {attempt + 1}/{max_retries})...")
-            
-            if openai_client == "legacy":
-                import openai
-                response = openai.ChatCompletion.create(model="gpt-3.5-turbo", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}], max_tokens=300, temperature=0.8, request_timeout=30)
-                ai_response = response.choices[0].message.content.strip()
-            else:
-                response = openai_client.chat.completions.create(model="gpt-3.5-turbo", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}], max_tokens=300, temperature=0.8, timeout=30.0)
-                ai_response = response.choices[0].message.content.strip()
+        logging.info("Generating AI tweets...")
+        
+        if openai_client == "legacy":
+            import openai
+            response = openai.ChatCompletion.create(model="gpt-3.5-turbo", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}], max_tokens=300, temperature=0.8)
+            ai_response = response.choices[0].message.content.strip()
+        else:
+            response = openai_client.chat.completions.create(model="gpt-3.5-turbo", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}], max_tokens=300, temperature=0.8)
+            ai_response = response.choices[0].message.content.strip()
+        
+        logging.info(f"AI Response received: {len(ai_response)} characters")
+        
+        main_tweet = ai_response.strip()
+        
+        if not main_tweet:
+            logging.error("AI returned an empty response.")
+            return None
 
-            if not ai_response:
-                raise ValueError("AI returned an empty response")
-            
-            logging.info(f"AI Response received: {len(ai_response)} characters")
-            
-            main_tweet = ai_response.strip().replace("Tweet:", "").replace("MAIN_TWEET:", "").strip()
-            
-            link_to_add = "\n\n🔗 outlight.fun"
-            max_text_length = 280 - len(link_to_add)
+        if main_tweet.startswith("MAIN_TWEET:"): main_tweet = main_tweet.replace("MAIN_TWEET:", "").strip()
+        if main_tweet.startswith("Tweet:"): main_tweet = main_tweet.replace("Tweet:", "").strip()
+        
+        link_to_add = "\n\n🔗 outlight.fun"
+        max_text_length = 280 - len(link_to_add)
 
-            if len(main_tweet) > max_text_length:
-                main_tweet = main_tweet[:max_text_length - 3] + "..."
-                logging.warning(f"AI tweet truncated to fit the link.")
-            
-            main_tweet += link_to_add
-            
-            logging.info("✅ AI tweet generated successfully!")
-            return main_tweet
-
-        except Exception as e:
-            logging.error(f"Error on AI generation attempt {attempt + 1}: {e}")
-            if attempt < max_retries - 1:
-                wait_time = (attempt + 1) * 5
-                logging.info(f"Waiting {wait_time} seconds before retrying...")
-                time.sleep(wait_time)
-            else:
-                logging.error("All attempts to generate AI tweet failed.")
-                logging.error(f"Full traceback: {traceback.format_exc()}")
-                return None
-    return None
+        if len(main_tweet) > max_text_length:
+            main_tweet = main_tweet[:max_text_length - 3] + "..."
+            logging.warning(f"AI tweet truncated to {len(main_tweet)} chars to fit the link.")
+        
+        main_tweet += link_to_add
+        
+        logging.info(f"✅ AI tweet generated successfully!")
+        logging.info(f"   - Tweet: {len(main_tweet)} chars")
+        
+        return main_tweet
+        
+    except Exception as e:
+        logging.error(f"Error during AI tweet generation: {e}")
+        import traceback
+        logging.error(f"Full traceback: {traceback.format_exc()}")
+        return None
 
 def main():
     logging.info("GitHub Action: Bot execution started.")
@@ -197,15 +218,16 @@ def main():
         return
     
     if not openai_client:
-        logging.error("❌ CRITICAL: OpenAI API key not found. Terminating.")
+        logging.error("❌ CRITICAL: OpenAI API key not found. Bot requires AI to function. Terminating.")
         return
 
-    logging.info("✅ Clients ready!")
+    logging.info("✅ OpenAI client initialized - MONTY AI ready!")
 
     try:
         client = tweepy.Client(consumer_key=api_key, consumer_secret=api_secret, access_token=access_token, access_token_secret=access_token_secret)
         me = client.get_me()
         logging.info(f"Successfully authenticated as: @{me.data.username}")
+        
     except Exception as e:
         logging.error(f"Error setting up Twitter client: {e}")
         return
@@ -220,9 +242,11 @@ def main():
     
     if not tweet_text:
         logging.error("Tweet generation failed. Nothing to send for this run.")
+        logging.info("GitHub Action: Bot execution finished due to AI failure.")
         return
 
-    logging.info(f"📝 MONTY tweet prepared for sending ({len(tweet_text)} chars):")
+    logging.info(f"📝 MONTY tweet prepared for sending:")
+    logging.info(f"   Tweet: {len(tweet_text)} chars")
     logging.info(f"   Content: {tweet_text.replace(chr(10), ' ')}")
 
     try:
@@ -234,10 +258,11 @@ def main():
             logging.info(f"🎉 SUCCESS: MONTY AI tweet posted!")
             logging.info(f"   🔗 Tweet URL: https://x.com/{me.data.username}/status/{main_tweet_id}")
         else:
-            logging.error("❌ CRITICAL ERROR: Failed to send tweet after retries!")
+            logging.error("❌ CRITICAL ERROR: Failed to send MONTY tweet after retries!")
 
     except Exception as e:
-        logging.error(f"Unexpected error during tweet sending: {e}")
+        logging.error(f"Unexpected error during tweet sending process: {e}")
+        import traceback
         logging.error(f"Full traceback: {traceback.format_exc()}")
 
     logging.info("GitHub Action: Bot execution finished.")
