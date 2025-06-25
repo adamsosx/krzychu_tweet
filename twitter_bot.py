@@ -126,9 +126,9 @@ def generate_ai_tweet(top_3_tokens):
             calls = token.get('filtered_calls', 0)
             symbol = token.get('symbol', 'Unknown')
             address = token.get('address', 'No Address')
-            # ZMIANA: Używamy pełnego adresu zamiast skracanego
+            # ZMIANA: Używamy pełnego adresu i emoji 📞 zamiast słowa "calls"
             full_address = address if address != 'No Address' else 'No Address'
-            token_data.append(f"{i}. ${symbol} - {calls} calls - CA: {full_address}")
+            token_data.append(f"{i}. ${symbol} - {calls}📞 - CA: {full_address}")
         
         data_summary = "\n".join(token_data)
         total_calls = sum(token.get('filtered_calls', 0) for token in top_3_tokens)
@@ -143,7 +143,7 @@ PERSONALITY & STYLE:
 
 CONTENT FOCUS:
 - Crypto analytics and token data.
-- **When mentioning a token, include its symbol and its FULL Contract Address (CA) for user convenience.**
+- **MANDATORY: When mentioning a token, ALWAYS include its symbol and its COMPLETE FULL Contract Address (CA). NEVER shorten or abbreviate the contract address.**
 - Use effective hooks in post beginnings.
 - Solana memes niche specialty.
 
@@ -159,15 +159,14 @@ DATA:
 
 Total calls tracked: {total_calls}
 
-Create 1 engaging post:
+MANDATORY REQUIREMENTS:
+- **ALWAYS include the COMPLETE FULL contract address for each token mentioned. NEVER shorten, abbreviate or truncate contract addresses.**
 - Start with a strong hook.
-- **Include the token data (Symbol and FULL CA) naturally.**
 - Use MONTY's witty, brief style.
-- Max 270 chars preferred.
 - Include relevant emojis.
 - Focus on Solana/meme insights.
 
-Just return the tweet text, no labels."""
+Create 1 engaging post. Just return the tweet text, no labels."""
 
         logging.info("Generating AI tweets...")
         
